@@ -1,0 +1,11 @@
+# built by prepare_data.py and by training
+mpov/iphone*/mvn_*
+mpov/iphone*/frames_*
+mpov/runs/static_i3/sfm/
+mpov/runs/*
+!mpov/runs/static_i3/
+!mpov/runs/dec3d_shared/
+# checkpoints are published on Zenodo
+release/
+__pycache__/
+*.pyc

@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>LaGSplat 3D</title>
+<style>
+ :root{--bg:#111418;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4caf50;--brd:#2a2f36;--arrow:#ffd479}
+ body{margin:0;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;overflow:hidden}
+ #wrap{position:fixed;inset:0}
+ #im{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+ #ov{position:absolute;inset:0;width:100%;height:100%;cursor:grab}
+ #ov.grabbing{cursor:grabbing}
+ #panel{position:absolute;left:10px;top:10px;background:rgba(17,20,24,.88);border:1px solid var(--brd);
+   border-radius:8px;padding:10px 12px;width:310px;max-height:calc(100vh - 40px);overflow:auto}
+ #panel h1{font-size:14px;margin:0 0 4px}
+ #panel h2{font-size:12px;margin:10px 0 2px;color:var(--mut);font-weight:600}
+ .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+ .row label{width:42px}
+ .row b{width:44px;text-align:right;font-weight:500;font-variant-numeric:tabular-nums}
+ input[type=range]{flex:1}
+ button{background:#1d2229;color:var(--fg);border:1px solid var(--brd);border-radius:5px;padding:4px 8px;cursor:pointer}
+ button.on{background:var(--acc);color:#000;border-color:var(--acc)}
+ #info{color:var(--mut);font-size:12px;line-height:1.45;margin-top:6px}
+ #help{font-size:11px;color:var(--mut);margin:4px 0 0;white-space:pre-wrap}
+ #camid{position:absolute;right:12px;bottom:10px;color:var(--mut);font-size:12px}
+</style></head><body>
+<div id="wrap"><img id="im" alt=""><canvas id="ov"></canvas></div>
+<div id="panel">
+ <h1>Scene 3D reconstruite, physique identifiee</h1>
+ <h2>bras (entree)</h2>
+ <div class="row"><label>s</label><input id="s" type="range" step="0.5"><b id="vs"></b></div>
+ <h2>forme de la languette</h2>
+ <div class="row"><label>q0</label><input id="q0" type="range" step="0.005"><b id="vq0"></b></div>
+ <div class="row"><label>q1</label><input id="q1" type="range" step="0.005"><b id="vq1"></b></div>
+ <div class="row"><button id="play" class="on">Pause</button><button id="kick">Impulsion</button><button id="rest">Repos</button></div>
+ <h2>saisie (clic gauche) : consigne de position</h2>
+ <div class="row"><label>rayon</label><input id="rad" type="range" min="4" max="80" step="1" value="24"><b id="vrad"></b></div>
+ <div class="row"><label>raideur</label><input id="kc" type="range" min="-2" max="1.5" step="0.05" value="-1.15"><b id="vkc"></b></div>
+ <div class="row"><label>dissipation</label><input id="cc" type="range" min="-1.5" max="1.5" step="0.05" value="-1.35"><b id="vcc"></b></div>
+ <div class="row"><label>force max</label><input id="fm" type="range" min="-2" max="0.5" step="0.05" value="-0.4"><b id="vfm"></b></div>
+ <div class="row"><label>n min</label><input id="nm" type="range" min="0" max="3" step="0.05" value="1.3"><b id="vnm"></b></div>
+ <div class="row"><label>coh. min</label><input id="cm" type="range" min="0" max="1" step="0.01" value="0.8"><b id="vcm"></b></div>
+ <div class="row"><button id="uni">saisie locale</button></div>
+ <h2>vue</h2>
+ <div class="row"><label>focale</label><input id="f" type="range" min="0.4" max="2.5" step="0.05" value="0.9"><b id="vf"></b></div>
+ <div id="info"></div>
+ <details><summary>Commandes</summary><pre id="help">souris
+- clic gauche + glisser : consigne de position
+  du point saisi (ressort raideur + amortisseur
+  dissipation, en x raideur propre et x
+  amortissement critique du systeme)
+- clic droit + glisser : tourner autour du centre
+- clic milieu + glisser : zoom
+- molette : zoom vers le centre
+- maj + molette : pan
+deplacement (zqsd, touches physiques)
+- z/s : avancer / reculer
+- q/d : translation laterale
+- espace / ctrl : monter / descendre
+- maj : plus vite
+camera (fleches)
+- gauche/droite : pivoter
+- haut/bas : incliner
+- a/e : roulis
+- i/k et j/l : orbiter
+autre
+- 0-9 : vues pre-chargees, -/+ : cycler
+- V : vue courante dans l'URL
+physique
+- toucher q0 ou q1 gele la dynamique ;
+  Lecture la relance depuis cet etat
+- le curseur s pilote le bras, qui le suit
+  avec une inertie</pre></details>
+</div>
+<div id="camid"></div>
+<script>
+const M = __META__, P = M.phys, BR = M.barrier, dt = P.dt;
+const im = document.getElementById('im'), ov = document.getElementById('ov'), g = ov.getContext('2d');
+
+// ── camera (reprise du viewer demo/3d.html, convention OpenCV : y bas, z devant) ──────
+const sub3=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], add3=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const mul3=(a,s)=>[a[0]*s,a[1]*s,a[2]*s], dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross3=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const len3=a=>Math.hypot(a[0],a[1],a[2]), norm3=a=>{const n=len3(a)||1;return [a[0]/n,a[1]/n,a[2]/n];};
+const rot3=(v,k,a)=>{const c=Math.cos(a),s=Math.sin(a),kv=cross3(k,v),d=dot3(k,v)*(1-c);
+  return [v[0]*c+kv[0]*s+k[0]*d, v[1]*c+kv[1]*s+k[1]*d, v[2]*c+kv[2]*s+k[2]*d];};
+const worldUp = norm3(M.down.map(x=>-x));
+const pivot = M.pivot.slice(), minRadius = 0.05*M.radius, maxRadius = 30*M.radius;
+let ax = null, C = null, orbitRadius = 1, W = 0, H = 0;
+function setE(E){ ax=[E[0].slice(0,3),E[1].slice(0,3),E[2].slice(0,3)];
+  const t=[E[0][3],E[1][3],E[2][3]]; C=[0,1,2].map(j=>-(ax[0][j]*t[0]+ax[1][j]*t[1]+ax[2][j]*t[2]));
+  orbitRadius=len3(sub3(C,pivot)); }
+function viewE(){ const t=ax.map(r=>-dot3(r,C));
+  return [ax[0][0],ax[0][1],ax[0][2],t[0], ax[1][0],ax[1][1],ax[1][2],t[1], ax[2][0],ax[2][1],ax[2][2],t[2], 0,0,0,1]; }
+function lookAtPivot(pos){ const f=norm3(sub3(pivot,pos)); const up=Math.abs(dot3(f,worldUp))>0.9995 ? mul3(ax[1],-1) : worldUp;
+  const r=norm3(cross3(f,up)); const d=cross3(f,r); ax=[r,d,f]; C=pos; }
+function setCameraPreset(i){ const dir=M.presets[i].E[2].slice(0,3);
+  lookAtPivot(sub3(pivot, mul3(dir, orbitRadius)));
+  document.getElementById('camid').textContent='cam '+i+'  '+M.presets[i].name; }
+function orbitAroundPivot(dx,dy){ const right=norm3(rot3(ax[0],worldUp,dx)); let off=rot3(sub3(C,pivot),worldUp,dx);
+  const tilted=rot3(off,right,dy); let useDy=dy;
+  if (Math.abs(dot3(norm3(tilted),worldUp))<0.995) off=tilted; else useDy=0;
+  const spin=v=>useDy? rot3(rot3(v,worldUp,dx),right,useDy) : rot3(v,worldUp,dx);
+  ax=ax.map(spin); C=add3(pivot,off); orbitRadius=len3(off); }
+function zoomBy(f){ const off=sub3(C,pivot), r=len3(off)||1e-6;
+  const k=Math.max(minRadius,Math.min(maxRadius,r*f))/r; C=add3(pivot,mul3(off,k)); orbitRadius=r*k; }
+function panBy(tx,ty){ const m=add3(mul3(ax[0],tx),mul3(ax[1],ty)); for(let i=0;i<3;i++) pivot[i]+=m[i]; C=add3(C,m); }
+function translateLocal(tx,ty,tz){ C=add3(C,add3(add3(mul3(ax[0],tx),mul3(ax[1],ty)),mul3(ax[2],tz))); }
+function rotateLocal(i,a){ const k=ax[i].slice(); ax=ax.map(v=>rot3(v,k,a)); }
+function yawWorld(a){ ax=ax.map(v=>rot3(v,worldUp,a)); }
+const Fs=document.getElementById('f');
+function camObj(){ return {E: viewE(), f: parseFloat(Fs.value)*W, W, H}; }
+
+// ── physique : q'' = -K q - C q' + G s'' + B s + b + J'f, integree ici ────────────────
+const sn = x => (x - M.u_mean) / M.u_std;              // s brut -> s normalise (entree du modele)
+function equilibrium(u){ // K q = B u + b
+  const r=[P.B[0][0]*u+P.b[0], P.B[1][0]*u+P.b[1]], K=P.K, det=K[0][0]*K[1][1]-K[0][1]*K[1][0];
+  return [( K[1][1]*r[0]-K[0][1]*r[1])/det, (-K[1][0]*r[0]+K[0][0]*r[1])/det]; }
+const KREF=0.5*(Math.abs(P.K[0][0])+Math.abs(P.K[1][1]));
+// Plafond de l'effort latent de saisie : la force de rappel maximale sur la frontiere des
+// donnees, le nuage des q mesures etant assimile a un disque de rayon R. Pour un rappel
+// K (q - q_c), le maximum sur le cercle |q - q_c| = R est sigma_max(K) R.
+const FREF=(()=>{const a=P.K[0][0],b=P.K[0][1],c=P.K[1][0],d=P.K[1][1];const s=a*a+b*b+c*c+d*d, t=a*d-b*c;return Math.sqrt(0.5*(s+Math.sqrt(Math.max(0,s*s-4*t*t))));})()*M.q_disk.r;
+// borne reglable (curseur « force max »), en multiples de FREF
+let FMAX=FREF*Math.pow(10,-0.4);
+// kc, cc : raideur et dissipation de la saisie, en multiples de KREF et de 2 sqrt(KREF)
+const S={q:[0,0], v:[0,0], u:sn(M.s_med), up:0, udd:0, target:sn(M.s_med), frozen:false,
+         radius:24, kc:Math.pow(10,-1.15), cc:Math.pow(10,-1.35), uniform:false, barrier:8, margin:0.02,
+         nmin:Math.pow(10,1.3), cmin:0.8, gate:0, grab:null, cursor:null, arrow:null};
+S.q = equilibrium(S.u);
+
+function distAt(q){ const n=BR.n;
+  const t=[0,1].map(k=>Math.max(0,Math.min(n-1,(q[k]-BR.lo[k])/(BR.hi[k]-BR.lo[k])*(n-1))));
+  const i=t.map(v=>Math.max(0,Math.min(n-2,Math.floor(v)))), f=t.map((v,k)=>v-i[k]);
+  const at=(a,b)=>BR.dist[b*n+a];
+  return (1-f[0])*(1-f[1])*at(i[0],i[1])+f[0]*(1-f[1])*at(i[0]+1,i[1])+(1-f[0])*f[1]*at(i[0],i[1]+1)+f[0]*f[1]*at(i[0]+1,i[1]+1); }
+function gradDist(q){ const h=2e-3, gr=[0,0];
+  for(let k=0;k<2;k++){ const a=q.slice(), b=q.slice(); a[k]+=h; b[k]-=h; gr[k]=(distAt(a)-distAt(b))/(2*h); }
+  const n=Math.hypot(gr[0],gr[1]); return n>1e-9?[gr[0]/n,gr[1]/n]:[0,0]; }
+// barriere : nulle DANS le domaine des q mesures, rappel + amortissement critique au-dela
+function barrierForce(q,v){ const F=[0,0], d=distAt(q); if(d<=0) return F;
+  const n=gradDist(q), kb=Math.min(S.barrier*KREF,1.5/(dt*dt)), cb=Math.min(2*Math.sqrt(kb),0.9/dt);
+  const vn=v[0]*n[0]+v[1]*n[1];
+  for(let k=0;k<2;k++){ F[k]=-kb*d*n[k]; if(vn>0) F[k]-=cb*vn*n[k]; } return F; }
+function wallProject(){ const d=distAt(S.q); if(d<=S.margin) return; const n=gradDist(S.q);
+  for(let k=0;k<2;k++) S.q[k]-=(d-S.margin)*n[k];
+  const vn=S.v[0]*n[0]+S.v[1]*n[1]; if(vn>0) for(let k=0;k<2;k++) S.v[k]-=vn*n[k]; }
+function stepOnce(){
+  // le bras suit la consigne avec une inertie, s'' borne a l'acceleration maximale mesuree
+  const lim=P.udd_max, kp=400, kd=40;
+  S.udd=Math.max(-lim,Math.min(lim,kp*(S.target-S.u)-kd*S.up));
+  S.up+=dt*S.udd; S.u+=dt*S.up;
+  if(S.frozen){ S.v=[0,0]; return; }                   // q impose : ni integration, ni effort
+  const Fb=barrierForce(S.q,S.v), a=[0,0];
+  for(let i=0;i<2;i++){
+    a[i]=P.b[i]+Fb[i]+P.G[i][0]*S.udd+P.B[i][0]*S.u;
+    for(let j=0;j<2;j++) a[i]+=-P.K[i][j]*S.q[j]-P.C[i][j]*S.v[j];
+  }
+  const cp=coupling();
+  if(!cp){ S.Fq=0; for(let i=0;i<2;i++) S.v[i]+=dt*a[i]; }
+  else {
+    // Euler implicite lineaire sur le couplage : (I + dt (c + dt k) J'J) v+ = v + dt (a + F0)
+    const A=[[0,0],[0,0]], r=[0,0], w=dt*(cp.c+dt*cp.k);
+    for(let i=0;i<2;i++){ r[i]=S.v[i]+dt*(a[i]+cp.F0[i]);
+      for(let j=0;j<2;j++) A[i][j]=(i===j?1:0)+w*cp.JtJ[i][j]; }
+    const det=A[0][0]*A[1][1]-A[0][1]*A[1][0];
+    const v1=[(A[1][1]*r[0]-A[0][1]*r[1])/det, (-A[1][0]*r[0]+A[0][0]*r[1])/det];
+    // effort de couplage au pas suivant ; s'il depasse FMAX, on applique a la place l'effort
+    // ramene a FMAX, en explicite (une force bornee ne destabilise pas le pas)
+    const F=[0,1].map(i=>cp.F0[i]-(cp.c+dt*cp.k)*(cp.JtJ[i][0]*v1[0]+cp.JtJ[i][1]*v1[1]));
+    const nF=Math.hypot(F[0],F[1]); S.Fq=Math.min(nF,FMAX);
+    if(nF<=FMAX) S.v=v1; else for(let i=0;i<2;i++) S.v[i]+=dt*(a[i]+F[i]*FMAX/nF);
+  }
+  for(let i=0;i<2;i++) S.q[i]+=dt*S.v[i];
+  wallProject();
+}
+function zOf(){ return [S.u, S.q[0], S.q[1]]; }
+
+// ── saisie : CONSIGNE DE POSITION du point saisi, ressort + amortisseur ──────────────
+// Le curseur x_c est une consigne pour le point materiel saisi p(q). Le point y est rappele
+// par un ressort k et freine par un amortisseur c sur sa vitesse image p' = J q' :
+//     F_q = J' [ k (x_c - p(q)) - c J q' ]
+// k et c sont donnes en multiples de la raideur propre KREF et de l'amortissement critique
+// 2 sqrt(KREF) du systeme identifie, ramenes au pixel par la plus grande valeur propre de
+// J'J : le reglage ne depend donc ni du zoom, ni du point de vue, ni du nombre de gaussiennes
+// saisies. A l'equilibre statique le point parcourt environ kc / (1 + kc) de l'ecart.
+// Les deux termes sont integres implicitement (stepOnce) : stables quels que soient k et c.
+// J et p sont redemandes en continu au serveur (ils dependent de l'etat ET de la vue) ;
+// entre deux reponses, p(q) est extrapole au premier ordre, p + J (q - q_ref).
+// Porte de saisie contre les artefacts (flotteurs isoles) : l'effort n'est non nul que si
+// la selection est NOMBREUSE (n_eff = 1 / sum w^2 >= nmin) et COHERENTE en q (coh =
+// |sum w J_i| / sum w |J_i| >= cmin, 1 si toutes les gaussiennes saisies bougent pareil
+// avec q). Rampes douces sous chaque seuil (de nmin/2 a nmin, de cmin - 0.1 a cmin) pour
+// que l'effort ne saute pas quand les statistiques sont remises a jour.
+function gateOf(neff, coh) {
+  const cl = x => Math.max(0, Math.min(1, x));
+  if (!(neff >= 0) || !(coh >= 0)) return 0;
+  return cl((neff - 0.5 * S.nmin) / (0.5 * S.nmin)) * cl((coh - (S.cmin - 0.1)) / 0.1);
+}
+let jacBusy=false;
+function coupling(){
+  if(!S.grab||!S.cursor||!S.grab.J) return null;
+  const g=gateOf(S.grab.neff,S.grab.coh); S.gate=g; if(g<=0) return null;
+  const J=S.grab.J, pt=S.grab.pt, qr=S.grab.qref||S.q;
+  const JJt=[[J[0][0]*J[0][0]+J[0][1]*J[0][1], J[0][0]*J[1][0]+J[0][1]*J[1][1]],
+             [0, J[1][0]*J[1][0]+J[1][1]*J[1][1]]];
+  const tr=0.5*(JJt[0][0]+JJt[1][1]), df=0.5*(JJt[0][0]-JJt[1][1]);
+  const lmax=tr+Math.sqrt(df*df+JJt[0][1]*JJt[0][1]);
+  if(!(lmax>1e-9)) return null;
+  const k=g*S.kc*KREF/lmax, c=g*S.cc*2*Math.sqrt(KREF)/lmax;
+  const p=[0,1].map(r=>pt[r]+J[r][0]*(S.q[0]-qr[0])+J[r][1]*(S.q[1]-qr[1]));
+  const e=[S.cursor[0]-p[0], S.cursor[1]-p[1]];
+  const JtJ=[[J[0][0]*J[0][0]+J[1][0]*J[1][0], J[0][0]*J[0][1]+J[1][0]*J[1][1]],
+             [0, J[0][1]*J[0][1]+J[1][1]*J[1][1]]]; JtJ[1][0]=JtJ[0][1];
+  const F0=[0,1].map(j=>k*(J[0][j]*e[0]+J[1][j]*e[1]));
+  return {k, c, JtJ, F0, p};
+}
+function effort(){
+  if(!S.grab||!S.cursor||S.frozen){ S.arrow=null; return; }
+  if(!jacBusy){ jacBusy=true; const z=zOf();
+    fetch('/jac',{method:'POST',body:JSON.stringify({cam:camObj(),z,id:S.grab.id})})
+      .then(r=>r.json()).then(j=>{ if(j.pt&&S.grab){ S.grab.pt=j.pt; S.grab.J=j.J; S.grab.qref=[z[1],z[2]]; S.grab.neff=j.neff; S.grab.coh=j.coh; } })
+      .catch(()=>{}).finally(()=>{ jacBusy=false; }); }
+  const cp=coupling();
+  // la consigne est toujours affichee, que la porte accepte la saisie ou non
+  S.arrow=cp?[cp.p, S.cursor.slice()]:(S.grab.pt?[S.grab.pt.slice(), S.cursor.slice()]:null); }
+
+// ── rendu cote serveur ─────────────────────────────────────────────────────────
+let busy=false, ms=0, last=performance.now(), fps=0, ckStep=M.step, ckN=M.gaussians;
+function resize(){ W=Math.floor(innerWidth/2)*2; H=Math.floor(innerHeight/2)*2; ov.width=W; ov.height=H; }
+async function request(){ busy=true;
+  try{ const r=await fetch('/render',{method:'POST',body:JSON.stringify({cam:camObj(),z:zOf()})});
+    ms=+r.headers.get('X-Render-Ms')||0;
+    const st=+r.headers.get('X-Step'); if(st&&st!==ckStep){ ckStep=st; ckN=+r.headers.get('X-Gaussians'); S.grab=null; S.arrow=null; }
+    const b=await r.blob(), u=URL.createObjectURL(b); im.onload=()=>URL.revokeObjectURL(u); im.src=u;
+  }catch(e){} finally{ busy=false; } }
+function drawOverlay(){ g.clearRect(0,0,W,H);
+  if(S.cursor && !S.grab){ g.strokeStyle='rgba(159,211,255,0.45)'; g.lineWidth=1;
+    g.beginPath(); g.arc(S.cursor[0],S.cursor[1],S.radius,0,6.284); g.stroke(); }
+  if(S.arrow){ const [p,c]=S.arrow; g.strokeStyle='#ffd479'; g.lineWidth=2;
+    g.beginPath(); g.moveTo(p[0],p[1]); g.lineTo(c[0],c[1]); g.stroke();
+    g.fillStyle='#ffd479'; g.beginPath(); g.arc(p[0],p[1],4,0,6.284); g.fill(); }
+ }
+
+// ── curseurs et boutons ──────────────────────────────────────────────────────────
+const Ss=document.getElementById('s'); Ss.min=M.s_lo; Ss.max=M.s_hi; Ss.value=M.s_med;
+Ss.addEventListener('input',()=>{ S.target=sn(+Ss.value); });
+const QS=[0,1].map(i=>{ const el=document.getElementById('q'+i); el.min=M.q_rng[0][i]; el.max=M.q_rng[1][i];
+  el.addEventListener('input',()=>{ if(!S.frozen) setFrozen(true); S.q[i]=+el.value; S.v=[0,0]; }); return el; });
+function setFrozen(f){ S.frozen=f; if(f) S.v=[0,0];
+  const b=document.getElementById('play'); b.textContent=f?'Lecture':'Pause'; b.classList.toggle('on',!f); }
+document.getElementById('play').onclick=()=>setFrozen(!S.frozen);
+document.getElementById('kick').onclick=()=>{ setFrozen(false); for(let i=0;i<2;i++) S.v[i]+=(Math.random()*2-1)*12*P.q_std[i]; };
+document.getElementById('rest').onclick=()=>{ S.q=equilibrium(S.u); S.v=[0,0]; };
+document.getElementById('rad').addEventListener('input',e=>S.radius=+e.target.value);
+document.getElementById('kc').addEventListener('input',e=>S.kc=Math.pow(10,+e.target.value));
+document.getElementById('cc').addEventListener('input',e=>S.cc=Math.pow(10,+e.target.value));
+document.getElementById('fm').addEventListener('input',e=>FMAX=FREF*Math.pow(10,+e.target.value));
+document.getElementById('nm').addEventListener('input',e=>S.nmin=Math.pow(10,+e.target.value));
+document.getElementById('cm').addEventListener('input',e=>S.cmin=+e.target.value);
+document.getElementById('uni').onclick=e=>{ S.uniform=!S.uniform; e.target.classList.toggle('on',S.uniform);
+  e.target.textContent=S.uniform?'saisie globale':'saisie locale'; };
+// un curseur ne garde pas le focus clavier (sinon zqsd et fleches le pilotent)
+document.querySelectorAll('input[type=range],button').forEach(el=>{
+  el.addEventListener('change',()=>el.blur()); el.addEventListener('mouseup',()=>el.blur()); });
+function sync(){
+  document.getElementById('vs').textContent=(S.u*M.u_std+M.u_mean).toFixed(0);
+  for(let i=0;i<2;i++){ document.getElementById('vq'+i).textContent=S.q[i].toFixed(2);
+    if(!S.frozen||document.activeElement!==QS[i]) QS[i].value=S.q[i]; }
+  document.getElementById('vrad').textContent=S.radius; document.getElementById('vkc').textContent=S.kc.toPrecision(2);
+  document.getElementById('vcc').textContent=S.cc.toPrecision(2);
+  document.getElementById('vfm').textContent=(FMAX/FREF).toPrecision(2)+' x ('+FMAX.toFixed(0)+')';
+  document.getElementById('vnm').textContent=S.nmin.toFixed(0);
+  document.getElementById('vcm').textContent=S.cmin.toFixed(2);
+  document.getElementById('vf').textContent=(+Fs.value).toFixed(2);
+  document.getElementById('info').innerHTML='checkpoint pas '+ckStep+', '+ckN+' gaussiennes (recharge automatique)<br>'+
+    'frequences propres identifiees '+P.freq_hz.map(x=>x.toFixed(2)).join(' et ')+' Hz<br>'+
+    (S.frozen?'<b>dynamique gelee</b> (Lecture pour relancer)<br>':'')+
+    (S.grab?'saisie : '+S.grab.n+' gaussiennes, n_eff '+(S.grab.neff||0).toFixed(0)+', coherence '+(S.grab.coh||0).toFixed(2)+
+      ', porte '+(100*S.gate).toFixed(0)+' %, effort '+(100*(S.Fq||0)/FMAX).toFixed(0)+' % du plafond<br>':'')+
+    'rendu '+ms.toFixed(0)+' ms, '+fps.toFixed(0)+' images/s'; }
+
+// ── souris : clic gauche = effort (comme demo/3d.html), droit = orbite, milieu = zoom ──
+let down=false, startX=0, startY=0;
+function xy(e){const r=ov.getBoundingClientRect(); return [(e.clientX-r.left)*W/r.width,(e.clientY-r.top)*H/r.height];}
+ov.addEventListener('contextmenu',e=>e.preventDefault());
+ov.addEventListener('mousedown',async e=>{ e.preventDefault(); startX=e.clientX; startY=e.clientY;
+  if(e.button===1) down=3; else if(e.button===2) down=4;
+  else if(e.button===0){ down=5; const p=xy(e); S.cursor=p;
+    const z=zOf();
+    const r=await fetch('/grab',{method:'POST',body:JSON.stringify({cam:camObj(),z,x:p[0],y:p[1],r:S.radius,uniform:S.uniform})});
+    const j=await r.json(); if(j&&j.id&&down===5){ j.qref=[z[1],z[2]]; S.grab=j; ov.classList.add('grabbing'); } } });
+ov.addEventListener('mousemove',e=>{ e.preventDefault();
+  if(down==4){ const dx=3.0*(e.clientX-startX)/innerWidth, dy=3.0*(e.clientY-startY)/innerHeight;
+    orbitAroundPivot(-dx,-dy); startX=e.clientX; startY=e.clientY; }
+  else if(down==3){ zoomBy(Math.exp((e.clientY-startY)*0.005)); startX=e.clientX; startY=e.clientY; }
+  else S.cursor=xy(e); });
+addEventListener('mouseup',()=>{ down=false; S.grab=null; S.arrow=null; ov.classList.remove('grabbing'); });
+ov.addEventListener('mouseleave',()=>{ if(!S.grab) S.cursor=null; });
+addEventListener('wheel',e=>{ if(e.target!==ov) return; e.preventDefault();
+  const scale=e.deltaMode==1?10:e.deltaMode==2?innerHeight:1;
+  if(e.shiftKey){ const ps=orbitRadius*0.0002; panBy(e.deltaX*scale*ps, e.deltaY*scale*ps); }
+  else { const sp=(e.ctrlKey||e.metaKey)?0.01:0.0015; zoomBy(Math.exp(e.deltaY*scale*sp)); } },{passive:false});
+
+// ── clavier (codes PHYSIQUES, donc zqsd sur AZERTY) ─────────────────────────────────
+let activeKeys=[], currentCameraIndex=1;
+addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') e.target.blur();
+  if((e.ctrlKey||e.metaKey)&&(e.code==='KeyS'||e.code==='KeyD')) e.preventDefault();
+  if(e.code==='Space') e.preventDefault();
+  if(!activeKeys.includes(e.code)) activeKeys.push(e.code);
+  if(/^\d$/.test(e.key)){ currentCameraIndex=parseInt(e.key)%M.presets.length; setCameraPreset(currentCameraIndex); }
+  if(['-','_'].includes(e.key)){ currentCameraIndex=(currentCameraIndex+M.presets.length-1)%M.presets.length; setCameraPreset(currentCameraIndex); }
+  if(['+','='].includes(e.key)){ currentCameraIndex=(currentCameraIndex+1)%M.presets.length; setCameraPreset(currentCameraIndex); }
+  if(e.code==='KeyV') location.hash='#'+JSON.stringify(viewE().map(k=>Math.round(k*1000)/1000));
+});
+addEventListener('keyup',e=>{ activeKeys=activeKeys.filter(k=>k!==e.code); });
+addEventListener('blur',()=>{ activeKeys=[]; });
+function keys(){ const has=k=>activeKeys.includes(k);
+  const shift=has('ShiftLeft')||has('ShiftRight'), ctrl=has('ControlLeft')||has('ControlRight'), sp=shift?0.1:0.02;
+  if(has('ArrowLeft')) yawWorld(0.01); if(has('ArrowRight')) yawWorld(-0.01);
+  if(has('ArrowUp')) rotateLocal(0,0.005); if(has('ArrowDown')) rotateLocal(0,-0.005);
+  if(has('KeyQ')) rotateLocal(2,0.01); if(has('KeyE')) rotateLocal(2,-0.01);
+  if(has('KeyW')) translateLocal(0,0,sp); if(has('KeyS')&&!ctrl) translateLocal(0,0,-sp);
+  if(has('KeyA')) translateLocal(-sp,0,0); if(has('KeyD')&&!ctrl) translateLocal(sp,0,0);
+  if(has('Space')) translateLocal(0,-sp,0); if(ctrl&&!has('KeyS')&&!has('KeyW')) translateLocal(0,sp,0);
+  if(['KeyJ','KeyK','KeyL','KeyI'].some(has)){ const d=4, Pp=add3(C,mul3(ax[2],d));
+    rotateLocal(1, has('KeyJ')?-0.05:has('KeyL')?0.05:0); rotateLocal(0, has('KeyI')?0.05:has('KeyK')?-0.05:0);
+    C=sub3(Pp,mul3(ax[2],d)); } }
+
+// ── boucle : la physique avance du temps reel ecoule, en sous-pas de dt ───────────────
+function loop(now){ const el=Math.min(0.25,(now-last)/1000); last=now; fps=0.9*fps+0.1/Math.max(el,1e-4);
+  keys();
+  const n=Math.min(40,Math.round(el/dt)); effort();
+  for(let i=0;i<n;i++) stepOnce();
+  drawOverlay(); sync(); if(!busy) request(); requestAnimationFrame(loop); }
+addEventListener('resize',resize);
+let h=null; try{ h=JSON.parse(decodeURIComponent(location.hash.slice(1))); }catch(e){}
+if(h&&h.length===16) setE([h.slice(0,4),h.slice(4,8),h.slice(8,12),h.slice(12,16)]); else setE(M.presets[1].E);
+resize(); requestAnimationFrame(loop);
+</script></body></html>
